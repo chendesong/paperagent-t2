@@ -19,13 +19,13 @@ jobs:
     timeout-minutes: 10
     env:
       IMAGE_DIGEST: ${{ inputs.digest }}
-      DOCKER_CONFIG: ${{ runner.temp }}/docker-anonymous
     steps:
       - name: Pull and run without registry credentials
         shell: bash
         run: |
           set -euo pipefail
           [[ "$IMAGE_DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]]
+          export DOCKER_CONFIG="$RUNNER_TEMP/docker-anonymous"
           mkdir -p "$DOCKER_CONFIG"
           test ! -f "$DOCKER_CONFIG/config.json"
           image="ghcr.io/chendesong/paperagent-t2@$IMAGE_DIGEST"
