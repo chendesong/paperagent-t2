@@ -1,0 +1,188 @@
+name: Build and smoke Paperagent T2
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: paperagent-t2-ghcr
+  cancel-in-progress: false
+
+jobs:
+  build:
+    if: github.repository == 'chendesong/paperagent-t2' && github.actor == github.repository_owner
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      TRACK_COMMIT: a2c93e7b66b8c6a6c429fda81d6bc7873b7c5dec
+      TOOLKIT_COMMIT: bd01548e34d21fd660d88fd06157078fb25ece4e
+      DOCKER_BUILD_RECORD_UPLOAD: "false"
+      DOCKER_BUILD_SUMMARY: "false"
+    steps:
+      - name: Preserve original Linux line endings
+        run: git config --global core.autocrlf false
+
+      - name: Fetch the fixed official Track 2 source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          repository: Agenthon-2026/track2-forecasting-public
+          ref: a2c93e7b66b8c6a6c429fda81d6bc7873b7c5dec
+          path: track-src
+          persist-credentials: false
+
+      - name: Fetch the fixed official toolkit v2.6.0
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          repository: Agenthon-2026/Agenthon2026-public
+          ref: bd01548e34d21fd660d88fd06157078fb25ece4e
+          path: toolkit-src
+          persist-credentials: false
+
+      - name: Set up Python 3.13 for the official verifier
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.13"
+
+      - name: Prepare a source-only build context
+        id: image
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git -C track-src rev-parse HEAD)" = "$TRACK_COMMIT"
+          test "$(git -C toolkit-src rev-parse HEAD)" = "$TOOLKIT_COMMIT"
+          python - <<'PY'
+          import os
+          import pathlib
+          import shutil
+          import tomllib
+
+          track = pathlib.Path("track-src")
+          toolkit = pathlib.Path("toolkit-src/common")
+          assert tomllib.loads((toolkit / "pyproject.toml").read_text())["project"]["version"] == "2.6.0"
+          package = track / "qfbench2_track_forecasting"
+          assert not any(p.is_symlink() for p in package.rglob("*")), "Symlinks are forbidden in the image context"
+          destination = pathlib.Path(os.environ["RUNNER_TEMP"]) / "paperagent-context"
+          destination.mkdir()
+          shutil.copytree(package, destination / package.name)
+          shutil.copyfile(track / "LICENSE", destination / "LICENSE")
+          original = (track / "Dockerfile").read_text()
+          tagged_url = "archive/refs/tags/v2.6.0.tar.gz#subdirectory=common"
+          assert original.count(tagged_url) == 1, "Unexpected official Dockerfile"
+          # Same toolkit release; only its download URL becomes immutable.
+          pinned = original.replace(tagged_url, "archive/" + os.environ["TOOLKIT_COMMIT"] + ".tar.gz#subdirectory=common")
+          package_copy = "COPY qfbench2_track_forecasting /opt/qfbench2_track_forecasting"
+          assert pinned.count(package_copy) == 1
+          pinned = pinned.replace(package_copy, package_copy + "\nCOPY LICENSE /opt/LICENSE.track2")
+          (destination / "Dockerfile").write_text(pinned)
+          assert {p.name for p in destination.iterdir()} == {"Dockerfile", "LICENSE", "qfbench2_track_forecasting"}
+          PY
+          printf 'name=ghcr.io/%s/paperagent-t2\n' "${GITHUB_ACTOR,,}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+
+      - name: Build the Linux amd64 image for smoke testing
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: ${{ runner.temp }}/paperagent-context
+          platforms: linux/amd64
+          load: true
+          push: false
+          tags: paperagent-t2:smoke
+          provenance: false
+          sbom: false
+          labels: |
+            org.opencontainers.image.source=https://github.com/chendesong/paperagent-t2
+            org.opencontainers.image.revision=a2c93e7b66b8c6a6c429fda81d6bc7873b7c5dec
+            org.opencontainers.image.description=Official Track 2 numerical reference baseline; toolkit v2.6.0 pinned by commit.
+
+      - name: Run the hardened official Linux smoke test
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --no-cache-dir "./toolkit-src/common[data]"
+          python -m pip install --no-cache-dir ./track-src
+          python - <<'PY'
+          import json
+          import subprocess
+          image = json.loads(subprocess.check_output(["docker", "image", "inspect", "paperagent-t2:smoke"]))[0]
+          assert image["Os"] == "linux" and image["Architecture"] == "amd64"
+          assert image["Config"]["Volumes"] is None, "The submission must not declare VOLUME"
+          labels = image["Config"]["Labels"]
+          assert labels["qfbench2.interface_version"] == "2.0"
+          assert labels["qfbench2.track"] == "forecasting"
+          assert labels["qfbench2.verb"] == "forecast"
+          PY
+          unit="$(realpath track-src/units/t2-EXAMPLE-ust-curve-1m)"
+          output="$RUNNER_TEMP/paperagent-output"
+          mkdir "$output"
+          chmod 777 "$output"
+          limits=(
+            --rm --read-only --user 65534:65534
+            --cap-drop=ALL --security-opt no-new-privileges
+            --tmpfs /tmp:rw,noexec,nosuid,nodev,size=64m
+            --pids-limit 256 --ulimit nofile=1024:1024 --ulimit nproc=256:256
+            --ulimit fsize=67108864:67108864
+            --cpus 2 --memory 4g --memory-swap 4g
+            --network=none -e QFBENCH_SEED=0 -e QFBENCH_NETWORK=none
+          )
+          docker run "${limits[@]}" paperagent-t2:smoke forecast --help
+          container="paperagent-smoke-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          trap 'docker rm -f "$container" >/dev/null 2>&1 || true' EXIT
+          timeout --signal=TERM --kill-after=10s 1800 \
+            docker run "${limits[@]}" --name "$container" \
+              -v "$unit:/input:ro" -v "$output:/output" \
+              paperagent-t2:smoke forecast \
+              --panels /input/panels --text /input/text --asof 2024-06-28 \
+              --out /output/forecast.parquet
+          # Includes the original manifest walk and official g0-g3 checks; failure stops publishing.
+          qfbench2-smoke "$unit" "$output" --track forecasting | tee "$RUNNER_TEMP/paperagent-smoke.txt"
+          {
+            printf 'Official Linux smoke completed with its original manifest checks.\n\n'
+            printf 'Local smoke quotas: 2 CPUs / 4 GiB; this does not certify platform timing.\n\n'
+            printf '```text\n'
+            cat "$RUNNER_TEMP/paperagent-smoke.txt"
+            printf '```\n'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Log in to GHCR with the short-lived workflow token
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish the successfully tested image
+        id: push
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: ${{ runner.temp }}/paperagent-context
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.image.outputs.name }}:run-${{ github.run_id }}-${{ github.run_attempt }}
+          provenance: false
+          sbom: false
+          labels: |
+            org.opencontainers.image.source=https://github.com/chendesong/paperagent-t2
+            org.opencontainers.image.revision=a2c93e7b66b8c6a6c429fda81d6bc7873b7c5dec
+            org.opencontainers.image.description=Official Track 2 numerical reference baseline; toolkit v2.6.0 pinned by commit.
+
+      - name: Record the real registry digest
+        env:
+          IMAGE_NAME: ${{ steps.image.outputs.name }}
+          IMAGE_DIGEST: ${{ steps.push.outputs.digest }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$IMAGE_DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]]
+          reference="$IMAGE_NAME@$IMAGE_DIGEST"
+          printf '%s\n' "$reference"
+          {
+            printf '\nImmutable image reference: `%s`\n\n' "$reference"
+            printf 'Track source: `%s`; toolkit v2.6.0 source: `%s`.\n\n' "$TRACK_COMMIT" "$TOOLKIT_COMMIT"
+            printf 'Package visibility still needs a separate check in Package settings. Public repository visibility alone is insufficient.\n\n'
+            printf 'After the package is Public, verify this digest from a clean Docker credential configuration before submission.\n'
+          } >> "$GITHUB_STEP_SUMMARY"
