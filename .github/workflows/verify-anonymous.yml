@@ -1,0 +1,38 @@
+name: Verify anonymous image access
+
+on:
+  workflow_dispatch:
+    inputs:
+      digest:
+        description: Tested image digest
+        required: true
+        default: sha256:bb148b1f85a5ad3c4742c2c9a51b4d728fc699ea112a8fc9cb40c30bc1b54b02
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    if: github.repository == 'chendesong/paperagent-t2' && github.actor == github.repository_owner
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      IMAGE_DIGEST: ${{ inputs.digest }}
+      DOCKER_CONFIG: ${{ runner.temp }}/docker-anonymous
+    steps:
+      - name: Pull and run without registry credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$IMAGE_DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]]
+          mkdir -p "$DOCKER_CONFIG"
+          test ! -f "$DOCKER_CONFIG/config.json"
+          image="ghcr.io/chendesong/paperagent-t2@$IMAGE_DIGEST"
+          docker --config "$DOCKER_CONFIG" pull --platform linux/amd64 "$image"
+          docker --config "$DOCKER_CONFIG" run --rm --read-only --network=none \
+            --user 65534:65534 --cap-drop=ALL --security-opt no-new-privileges \
+            --tmpfs /tmp:rw,noexec,nosuid,nodev,size=64m \
+            --cpus 2 --memory 4g --memory-swap 4g \
+            "$image" forecast --help
+          printf 'Anonymous pull and offline CLI check succeeded for `%s`.\n' "$image" >> "$GITHUB_STEP_SUMMARY"
