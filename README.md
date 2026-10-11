@@ -1,6 +1,11 @@
 # Paperagent T2：手动云端构建
 
-此目录是一份可检查的本地方案。是否已经云端执行、发布成功，应以 GitHub Actions 的运行结果为准。目标为专用仓库 `chendesong/paperagent-t2` 和 `ghcr.io/chendesong/paperagent-t2`。
+2026-10-12 已在专用仓库 `chendesong/paperagent-t2` 完成真实云端构建、官方完整 Linux 样例检查、GHCR 发布与匿名拉取。当前作品是用于接入比赛的官方数值基线，不是经过性能优化的策略。
+
+- [构建与官方检查成功](https://github.com/chendesong/paperagent-t2/actions/runs/38153519069)：样例输出 `admissible=True`。
+- [匿名拉取与离线 CLI 验证成功](https://github.com/chendesong/paperagent-t2/actions/runs/38153864508)。
+- 固定镜像：`ghcr.io/chendesong/paperagent-t2@sha256:bb148b1f85a5ad3c4742c2c9a51b4d728fc699ea112a8fc9cb40c30bc1b54b02`。
+- 镜像页面实际显示 Public；没有额外修改访问权限。
 
 工作流仅支持手动触发，使用标准 `ubuntu-24.04` runner；权限只有 `contents: read`、`packages: write`。官方 Actions 全部固定到提交 SHA。登录仅使用运行时自动生成的 `GITHUB_TOKEN`，无需提供 PAT、Team Key、简历或模型密钥。
 
@@ -17,7 +22,7 @@
 
 ## 执行与公开访问
 
-将 `.github/workflows/build.yml` 放到专用仓库的默认分支，然后在 **Actions → Build and smoke Paperagent T2 → Run workflow** 手动运行。创建/修改仓库及触发工作流需要该账号已授权的写入权限；此草稿没有执行这些云端操作。
+`.github/workflows/build.yml` 和 `verify-anonymous.yml` 已放到专用仓库默认分支并手动运行成功。以后修改策略后，可在 **Actions → Build and smoke Paperagent T2 → Run workflow** 构建新版本；新 digest 应再通过独立的匿名访问检查。第一次匿名检查有配置错误，修复后成功运行，没有跳过实际拉取。
 
 首次发布的 package 默认是 **Private**。公开仓库不会自动公开 GHCR package：检查内容只包含上述基线后，在该 package 的 **Package settings → Danger Zone → Change visibility → Public** 单独操作并确认。容器 package 的 Public 状态才允许匿名拉取。
 
